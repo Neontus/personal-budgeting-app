@@ -1,37 +1,57 @@
 /**
  * Edge Function: plaid-webhook
  *
- * Receives and verifies Plaid webhooks, then dispatches to the appropriate
- * handler (sync-transactions, budget-check, etc.)
+ * Receives Plaid webhooks, verifies their cryptographic signature, then
+ * dispatches to the appropriate internal handler.
  *
  * POST /functions/v1/plaid-webhook
- * No auth header — verified via Plaid JWT signature
+ * Auth: Plaid JWT signature (Plaid-Verification header) — NOT a Supabase JWT.
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import {
+  verifyPlaidWebhook,
+  securityHeaders,
+} from '../_shared/security.ts';
 
-const PLAID_CLIENT_ID = Deno.env.get('PLAID_CLIENT_ID')!;
-const PLAID_SECRET    = Deno.env.get('PLAID_SECRET')!;
-const PLAID_ENV       = Deno.env.get('PLAID_ENV') ?? 'sandbox';
-const PLAID_BASE_URL  = `https://${PLAID_ENV}.plaid.com`;
-const SUPABASE_URL    = Deno.env.get('SUPABASE_URL')!;
-const SERVICE_KEY     = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const INTERNAL_SECRET = Deno.env.get('INTERNAL_API_SECRET')!;
 
 Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
+    return new Response('Method not allowed', {
+      status: 405,
+      headers: securityHeaders,
+    });
   }
 
-  const body = await req.text();
-  const payload = JSON.parse(body) as PlaidWebhookPayload;
+  // Read the raw body FIRST — we need it for signature verification AND parsing.
+  const rawBody = await req.text();
+
+  // ── Verify Plaid webhook signature ────────────────────────────────────────
+  // In sandbox: logged warning, skipped.
+  // In production: full RSA-SHA256 + body-hash verification.
+  const isVerified = await verifyPlaidWebhook(req, rawBody);
+  if (!isVerified) {
+    // Return 200 to Plaid even on failure so Plaid doesn't keep retrying a
+    // request we've already identified as forged.  Log it for alerting.
+    console.error('[plaid-webhook] SECURITY: Rejected unverified webhook request');
+    return new Response('OK', { status: 200, headers: securityHeaders });
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  let payload: PlaidWebhookPayload;
+  try {
+    payload = JSON.parse(rawBody) as PlaidWebhookPayload;
+  } catch {
+    console.error('[plaid-webhook] Failed to parse body as JSON');
+    return new Response('OK', { status: 200, headers: securityHeaders });
+  }
 
   console.log(`[plaid-webhook] ${payload.webhook_type}/${payload.webhook_code}`, {
     item_id: payload.item_id,
   });
-
-  // TODO: Verify Plaid webhook JWT signature using the plaid-webhooks-verification library
-  // For now, we trust the payload in sandbox. In production, verify the
-  // Plaid-Verification header before processing.
 
   const serviceSupabase = createClient(SUPABASE_URL, SERVICE_KEY);
 
@@ -43,26 +63,31 @@ Deno.serve(async (req: Request) => {
     .single();
 
   if (!linkedAccount) {
+    // Unknown item_id — could be a leftover from a deleted account.
+    // Always return 200 so Plaid stops retrying.
     console.warn('[plaid-webhook] Unknown item_id:', payload.item_id);
-    return new Response('OK', { status: 200 }); // Always return 200 to Plaid
+    return new Response('OK', { status: 200, headers: securityHeaders });
   }
 
-  // Handle different webhook types
+  // Internal function calls use INTERNAL_API_SECRET, not SERVICE_KEY.
+  // SERVICE_KEY must never be passed to internal HTTP calls — it would leak
+  // elevated DB privileges to any function that receives it.
+  const internalHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${INTERNAL_SECRET}`,
+  };
+
   switch (payload.webhook_type) {
     case 'TRANSACTIONS': {
       if (
         payload.webhook_code === 'SYNC_UPDATES_AVAILABLE' ||
-        payload.webhook_code === 'DEFAULT_UPDATE' ||
-        payload.webhook_code === 'INITIAL_UPDATE' ||
+        payload.webhook_code === 'DEFAULT_UPDATE'         ||
+        payload.webhook_code === 'INITIAL_UPDATE'         ||
         payload.webhook_code === 'HISTORICAL_UPDATE'
       ) {
-        // Trigger sync-transactions (fire-and-forget)
         fetch(`${SUPABASE_URL}/functions/v1/sync-transactions`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${SERVICE_KEY}`,
-          },
+          headers: internalHeaders,
           body: JSON.stringify({ linked_account_id: linkedAccount.id }),
         }).catch(console.error);
       }
@@ -71,28 +96,26 @@ Deno.serve(async (req: Request) => {
 
     case 'ITEM': {
       if (payload.webhook_code === 'ERROR') {
-        // Update linked account status to 'error'
         await serviceSupabase
           .from('linked_accounts')
-          .update({ status: 'error', error_code: payload.error?.error_code })
+          .update({ status: 'error', error_code: payload.error?.error_code ?? null })
           .eq('id', linkedAccount.id);
-
-        // TODO Phase 5: Send notification to re-link account
+        // TODO Phase 5: Trigger re-link notification
       }
       if (payload.webhook_code === 'PENDING_EXPIRATION') {
         await serviceSupabase
           .from('linked_accounts')
-          .update({ consent_expires_at: payload.consent_expiration_time })
+          .update({ consent_expires_at: payload.consent_expiration_time ?? null })
           .eq('id', linkedAccount.id);
       }
       break;
     }
 
     default:
-      console.log('[plaid-webhook] Unhandled webhook:', payload.webhook_type, payload.webhook_code);
+      console.log('[plaid-webhook] Unhandled:', payload.webhook_type, payload.webhook_code);
   }
 
-  return new Response('OK', { status: 200 });
+  return new Response('OK', { status: 200, headers: securityHeaders });
 });
 
 interface PlaidWebhookPayload {
