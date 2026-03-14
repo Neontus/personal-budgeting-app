@@ -11,10 +11,12 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
-const PLAID_CLIENT_ID = Deno.env.get('PLAID_CLIENT_ID')!;
-const PLAID_SECRET    = Deno.env.get('PLAID_SECRET')!;
-const PLAID_ENV       = Deno.env.get('PLAID_ENV') ?? 'sandbox';
-const PLAID_BASE_URL  = `https://${PLAID_ENV}.plaid.com`;
+const PLAID_CLIENT_ID   = Deno.env.get('PLAID_CLIENT_ID')!;
+const PLAID_SECRET      = Deno.env.get('PLAID_SECRET')!;
+const PLAID_ENV         = Deno.env.get('PLAID_ENV') ?? 'sandbox';
+const PLAID_BASE_URL    = `https://${PLAID_ENV}.plaid.com`;
+const SUPABASE_URL      = Deno.env.get('SUPABASE_URL')!;
+const INTERNAL_SECRET   = Deno.env.get('INTERNAL_API_SECRET')!;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -75,13 +77,29 @@ Deno.serve(async (req: Request) => {
       item_id: string;
     };
 
-    // 2. Store linked account (service role to bypass RLS)
+    // 2. Store access_token in Vault; save the returned secret UUID in the DB.
+    const { data: vaultSecretId, error: vaultError } = await serviceSupabase
+      .rpc('create_plaid_vault_secret', {
+        p_secret: access_token,
+        p_name:   `plaid_access_token_${item_id}`,
+      });
+
+    if (vaultError || !vaultSecretId) {
+      console.error('[plaid-exchange-token] Vault error:', vaultError?.code);
+      return new Response(JSON.stringify({ error: 'Failed to secure access token' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // 3. Store linked account (service role to bypass RLS).
+    //    plaid_access_token holds the vault secret UUID, not the raw token.
     const { data: linkedAccount, error: insertError } = await serviceSupabase
       .from('linked_accounts')
       .insert({
-        user_id: user.id,
-        plaid_item_id: item_id,
-        plaid_access_token: access_token, // TODO: encrypt via Supabase Vault in production
+        user_id:            user.id,
+        plaid_item_id:      item_id,
+        plaid_access_token: vaultSecretId as string,
         institution_name,
         institution_id,
         status: 'active',
@@ -90,14 +108,14 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (insertError) {
-      console.error('[plaid-exchange-token] DB insert error:', insertError);
+      console.error('[plaid-exchange-token] DB insert error:', insertError.code);
       return new Response(JSON.stringify({ error: 'Failed to store account' }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    // 3. Fetch accounts from Plaid
+    // 4. Fetch accounts from Plaid
     const accountsResp = await fetch(`${PLAID_BASE_URL}/accounts/get`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -130,13 +148,12 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // 4. Trigger initial transaction sync (fire-and-forget)
-    const syncUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/sync-transactions`;
-    fetch(syncUrl, {
+    // 5. Trigger initial transaction sync (fire-and-forget).
+    fetch(`${SUPABASE_URL}/functions/v1/sync-transactions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+        Authorization: `Bearer ${INTERNAL_SECRET}`,
       },
       body: JSON.stringify({ linked_account_id: linkedAccount.id }),
     }).catch(console.error);

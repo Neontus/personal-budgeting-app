@@ -60,9 +60,24 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const userId      = linkedAccount.user_id as string;
-  const accessToken = linkedAccount.plaid_access_token as string;
-  let   cursor      = (linkedAccount.cursor ?? null) as string | null;
+  const userId = linkedAccount.user_id as string;
+  let   cursor = (linkedAccount.cursor ?? null) as string | null;
+
+  // plaid_access_token stores a Vault secret UUID — decrypt it at runtime.
+  const { data: resolvedToken, error: vaultError } = await supabase
+    .rpc('get_plaid_vault_secret', {
+      p_secret_id: linkedAccount.plaid_access_token as string,
+    });
+
+  if (vaultError || !resolvedToken) {
+    console.error('[sync-transactions] Failed to resolve vault secret:', vaultError?.code);
+    return new Response(JSON.stringify({ error: 'Vault error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...securityHeaders },
+    });
+  }
+
+  const accessToken = resolvedToken as string;
 
   const accountMap = new Map<string, string>();
   for (const acc of (linkedAccount.accounts ?? []) as { plaid_account_id: string; id: string }[]) {
