@@ -9,21 +9,19 @@
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { corsHeaders, securityHeaders } from '../_shared/security.ts';
 
 const PLAID_CLIENT_ID = Deno.env.get('PLAID_CLIENT_ID')!;
 const PLAID_SECRET    = Deno.env.get('PLAID_SECRET')!;
 const PLAID_ENV       = Deno.env.get('PLAID_ENV') ?? 'sandbox';
 const PLAID_BASE_URL  = `https://${PLAID_ENV}.plaid.com`;
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
 Deno.serve(async (req: Request) => {
+  const origin = req.headers.get('Origin');
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: corsHeaders(origin) });
   }
 
   try {
@@ -38,7 +36,7 @@ Deno.serve(async (req: Request) => {
     if (authError || !user) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
       });
     }
 
@@ -64,19 +62,19 @@ Deno.serve(async (req: Request) => {
       console.error('[plaid-link-token] Plaid error:', plaidData);
       return new Response(
         JSON.stringify({ error: plaidData.error_message ?? 'Plaid error' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        { status: 500, headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
     return new Response(
       JSON.stringify({ link_token: plaidData.link_token }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (err) {
     console.error('[plaid-link-token] Unexpected error:', err);
     return new Response(JSON.stringify({ error: 'Internal server error' }), {
       status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
     });
   }
 });

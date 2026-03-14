@@ -64,8 +64,12 @@ export function useCreateBudget() {
       account_id?: string;
       alert_thresholds?: number[];
     }) => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
       const { error } = await supabase.from('budgets').insert({
         ...input,
+        user_id: user.id,
         alert_thresholds: input.alert_thresholds ?? [50, 80, 100],
         is_active: true,
       });

@@ -18,13 +18,23 @@
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { isInternalRequest, unauthorizedResponse, securityHeaders } from '../_shared/security.ts';
 
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
-const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const SUPABASE_URL      = Deno.env.get('SUPABASE_URL')!;
+const SERVICE_KEY       = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const INTERNAL_SECRET   = Deno.env.get('INTERNAL_API_SECRET')!;
 
 Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
+    return new Response('Method not allowed', {
+      status: 405,
+      headers: securityHeaders,
+    });
+  }
+
+  if (!isInternalRequest(req)) {
+    console.error('[scheduled-reports] SECURITY: Rejected unauthorized request');
+    return unauthorizedResponse();
   }
 
   const { report_type } = await req.json() as { report_type: 'weekly' | 'monthly' };
@@ -87,7 +97,7 @@ Deno.serve(async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${SERVICE_KEY}`,
+        Authorization: `Bearer ${INTERNAL_SECRET}`,
       },
       body: JSON.stringify({
         user_id,

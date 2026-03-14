@@ -1,3 +1,6 @@
+# Obsidian vault symlink — local only
+agent_docs
+
 # Dependencies
 node_modules/
 .pnp
@@ -36,6 +39,9 @@ pnpm-debug.log*
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Claude Code worktrees
+.claude/worktrees/
 
 # Editor
 .vscode/

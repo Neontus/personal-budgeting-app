@@ -12,6 +12,11 @@ interface UseTransactionsOptions {
   limit?: number;
 }
 
+/** Escape PostgREST filter metacharacters to prevent filter injection. */
+function sanitizePostgRESTValue(value: string): string {
+  return value.replace(/[\\,.()*%]/g, '\\$&');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Fetch transactions for the current user
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,8 +36,9 @@ export function useTransactions(options: UseTransactionsOptions = {}) {
       if (options.startDate) query = query.gte('date', options.startDate);
       if (options.endDate) query = query.lte('date', options.endDate);
       if (options.search) {
+        const safeSearch = sanitizePostgRESTValue(options.search);
         query = query.or(
-          `merchant_name.ilike.%${options.search}%,name.ilike.%${options.search}%`
+          `merchant_name.ilike.%${safeSearch}%,name.ilike.%${safeSearch}%`
         );
       }
       if (options.limit) query = query.limit(options.limit);
@@ -105,10 +111,13 @@ export function useRecategorizeTransaction() {
 
       // 2. Upsert category rule so future transactions with same merchant auto-categorize
       if (learnRule && merchantName) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) throw new Error('Not authenticated');
+
         const { error: ruleError } = await supabase
           .from('category_rules')
           .upsert(
-            { merchant_pattern: merchantName, category_id: categoryId },
+            { user_id: user.id, merchant_pattern: merchantName, category_id: categoryId },
             { onConflict: 'user_id,merchant_pattern' }
           );
         if (ruleError) throw ruleError;

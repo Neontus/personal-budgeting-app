@@ -10,6 +10,7 @@
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { corsHeaders, securityHeaders } from '../_shared/security.ts';
 
 const PLAID_CLIENT_ID   = Deno.env.get('PLAID_CLIENT_ID')!;
 const PLAID_SECRET      = Deno.env.get('PLAID_SECRET')!;
@@ -18,14 +19,11 @@ const PLAID_BASE_URL    = `https://${PLAID_ENV}.plaid.com`;
 const SUPABASE_URL      = Deno.env.get('SUPABASE_URL')!;
 const INTERNAL_SECRET   = Deno.env.get('INTERNAL_API_SECRET')!;
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
 Deno.serve(async (req: Request) => {
+  const origin = req.headers.get('Origin');
+
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: corsHeaders(origin) });
   }
 
   try {
@@ -44,7 +42,7 @@ Deno.serve(async (req: Request) => {
     if (authError || !user) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
       });
     }
 
@@ -68,7 +66,7 @@ Deno.serve(async (req: Request) => {
     if (!exchangeResp.ok) {
       return new Response(JSON.stringify({ error: exchangeData.error_message }), {
         status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
       });
     }
 
@@ -88,7 +86,7 @@ Deno.serve(async (req: Request) => {
       console.error('[plaid-exchange-token] Vault error:', vaultError?.code);
       return new Response(JSON.stringify({ error: 'Failed to secure access token' }), {
         status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
       });
     }
 
@@ -111,7 +109,7 @@ Deno.serve(async (req: Request) => {
       console.error('[plaid-exchange-token] DB insert error:', insertError.code);
       return new Response(JSON.stringify({ error: 'Failed to store account' }), {
         status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
       });
     }
 
@@ -160,13 +158,13 @@ Deno.serve(async (req: Request) => {
 
     return new Response(
       JSON.stringify({ success: true, linked_account_id: linkedAccount.id }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (err) {
     console.error('[plaid-exchange-token] Error:', err);
     return new Response(JSON.stringify({ error: 'Internal server error' }), {
       status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders(origin), ...securityHeaders, 'Content-Type': 'application/json' },
     });
   }
 });
